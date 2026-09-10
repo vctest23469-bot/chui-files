@@ -60,7 +60,7 @@ struct ChuiFilesApp: App {
                 Button("后退") { workspace.active.back(hidden: workspace.hidden) }.keyboardShortcut("[")
                 Button("前进") { workspace.active.forward(hidden: workspace.hidden) }.keyboardShortcut("]")
                 Button("选择文件夹…") { workspace.chooseFolder() }.keyboardShortcut("o", modifiers: [.command, .shift])
-                Button("递归搜索…") { workspace.search() }.keyboardShortcut("f", modifiers: [.command, .shift])
+                Button("栏内搜索") { workspace.search() }.keyboardShortcut("f", modifiers: [.command, .shift])
             }
             CommandGroup(after: .toolbar) {
                 Button("显示 / 隐藏隐藏文件") { workspace.toggleHidden() }.keyboardShortcut(".", modifiers: [.command, .shift])
@@ -135,7 +135,6 @@ struct MainView: View {
         .background(MaterialView().ignoresSafeArea())
         .tint(Theme.accent)
         .sheet(isPresented: $model.showSync) { SyncView(model: model) }
-        .sheet(isPresented: $model.showSearch) { SearchView(model: model) }
         .sheet(item: $model.editor) { EditorView(document: $0, model: model) }
         .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
     }
@@ -192,6 +191,7 @@ struct PaneView: View {
     @ObservedObject var pane: Pane
     @ObservedObject var model: Workspace
     let isLeft: Bool
+    @FocusState private var searchFocused: Bool
     var active: Bool { model.activeLeft == isLeft }
     var body: some View {
         VStack(spacing: 0) {
@@ -200,8 +200,22 @@ struct PaneView: View {
                 Tool(icon: "chevron.left", help: "后退") { pane.back(hidden: model.hidden) }.disabled(pane.history.isEmpty)
                 Tool(icon: "chevron.right", help: "前进") { pane.forward(hidden: model.hidden) }.disabled(pane.future.isEmpty)
                 Tool(icon: "arrow.up", help: "上一级") { pane.go(pane.folder.deletingLastPathComponent(), hidden: model.hidden) }
-                Spacer()
-                Tool(icon: "magnifyingglass", help: "递归搜索") { model.activeLeft = isLeft; model.search() }
+                Spacer(minLength: 8)
+                if pane.searching {
+                    HStack(spacing: 5) {
+                        Image(systemName: "magnifyingglass")
+                        TextField("搜索此目录及子目录", text: $pane.searchQuery)
+                            .textFieldStyle(.plain).focused($searchFocused)
+                            .onSubmit { model.runSearch(in: pane) }
+                            .onChange(of: pane.searchQuery) { _, _ in
+                                model.scheduleSearch(in: pane)
+                            }
+                            .onExitCommand { pane.endSearch() }
+                        Button { pane.endSearch() } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).help("退出搜索")
+                    }.padding(6).background(Color.primary.opacity(0.09)).clipShape(RoundedRectangle(cornerRadius: 5)).frame(maxWidth: 330)
+                } else {
+                    Tool(icon: "magnifyingglass", help: "搜索此栏 ⇧⌘F") { model.activeLeft = isLeft; model.search() }
+                }
                 Tool(icon: pane.grid ? "list.bullet" : "square.grid.2x2", help: "切换列表 / 图标视图") { pane.grid.toggle() }
                 Tool(icon: "plus", help: "新标签页") { pane.newTab(hidden: model.hidden) }
             }.padding(.horizontal, 6).frame(height: 36)
@@ -221,6 +235,16 @@ struct PaneView: View {
                 TextField("按名称或标签过滤", text: $pane.filter).textFieldStyle(.plain)
                 if !pane.filter.isEmpty { Button { pane.filter = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain) }
             }.font(.system(size: 11)).padding(.horizontal, 12).frame(height: 29).background(Color.primary.opacity(0.035))
+            if pane.searching {
+                HStack {
+                    if pane.searchRunning { ProgressView().controlSize(.mini) }
+                    Text(pane.searchRunning ? "正在搜索…" : (pane.searchError ?? (pane.searchQuery.isEmpty ? "输入即搜索 · 内容:关键词 可搜索文本" : "搜索结果：\(pane.searchResults.count) 项")))
+                    Spacer()
+                    if let item = pane.selected.first {
+                        Button("所在文件夹") { model.navigate(item.url.deletingLastPathComponent(), pane: pane) }.buttonStyle(.plain)
+                    }
+                }.font(.system(size: 11)).padding(.horizontal, 12).frame(height: 28)
+            }
             Divider()
             if let error = pane.error {
                 VStack(spacing: 12) { Image(systemName: "exclamationmark.folder").font(.largeTitle); Text("无法读取文件夹").font(.headline); Text(error).font(.caption).multilineTextAlignment(.center); Button("重新选择文件夹") { model.activeLeft = isLeft; model.chooseFolder() } }.foregroundStyle(Color(nsColor: Theme.secondaryText)).padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -240,6 +264,7 @@ struct PaneView: View {
             }.buttonStyle(WorkbenchButtonStyle()).padding(.horizontal, 12).frame(height: 38).disabled(model.busy || pane.selected.isEmpty)
         }
         .background(Color(nsColor: Theme.panel))
+        .onChange(of: pane.searchFocus) { _, _ in searchFocused = true }
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded { model.activeLeft = isLeft })
 
@@ -302,7 +327,10 @@ struct FileTable: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let coordinator = context.coordinator; coordinator.parent = self
         let rows = pane.visible
-        if rows != coordinator.rows { coordinator.rows = rows; coordinator.updating = true; coordinator.table?.reloadData(); coordinator.updating = false }
+        let rowHeight: CGFloat = pane.searching && !pane.searchQuery.isEmpty ? 42 : 25
+        let layoutChanged = coordinator.table?.rowHeight != rowHeight
+        coordinator.table?.rowHeight = rowHeight
+        if rows != coordinator.rows || layoutChanged { coordinator.rows = rows; coordinator.updating = true; coordinator.table?.reloadData(); coordinator.updating = false }
         let indexes = IndexSet(rows.enumerated().filter { pane.selection.contains($0.element.id) }.map(\.offset))
         if coordinator.table?.selectedRowIndexes != indexes { coordinator.updating = true; coordinator.table?.selectRowIndexes(indexes, byExtendingSelection: false); coordinator.updating = false }
     }
@@ -321,7 +349,14 @@ struct FileTable: NSViewRepresentable {
                 let image = NSImageView(image: NSWorkspace.shared.icon(forFile: entry.url.path)); image.imageScaling = .scaleProportionallyDown
                 image.translatesAutoresizingMaskIntoConstraints = false; image.widthAnchor.constraint(equalToConstant: 17).isActive = true; image.heightAnchor.constraint(equalToConstant: 17).isActive = true
                 field.stringValue = entry.name + (entry.symlink ? " ↗" : "")
-                let stack = NSStackView(views: [image, field]); stack.spacing = 7; stack.alignment = .centerY
+                let nameContent: NSView
+                if parent.pane.searching && !parent.pane.searchQuery.isEmpty {
+                    let path = NSTextField(labelWithString: entry.url.deletingLastPathComponent().path)
+                    path.font = .systemFont(ofSize: 10); path.textColor = Theme.secondaryText; path.lineBreakMode = .byTruncatingMiddle
+                    let labels = NSStackView(views: [field, path]); labels.orientation = .vertical; labels.alignment = .leading; labels.spacing = 2
+                    nameContent = labels
+                } else { nameContent = field }
+                let stack = NSStackView(views: [image, nameContent]); stack.spacing = 7; stack.alignment = .centerY
                 stack.toolTip = entry.url.path + (entry.tags.isEmpty ? "" : "\n标签：" + entry.tags.joined(separator: ", "))
                 return stack
             }
@@ -499,17 +534,5 @@ struct EditorView: View {
             try text.write(to: document.url, atomically: true, encoding: .utf8)
             model.log("已保存：\(document.url.lastPathComponent)"); model.editor = nil; model.refresh()
         } catch { model.report(error) }
-    }
-}
-
-struct SearchView: View {
-    @ObservedObject var model: Workspace
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack { Text("搜索结果").font(.title2.bold()); Spacer(); if model.searchRunning { ProgressView().controlSize(.small) }; Text("\(model.searchResults.count) 项") }
-            if let error = model.searchError { Text(error).foregroundStyle(.red).font(.caption) }
-            List(model.searchResults) { item in Button { model.navigate(item.url.deletingLastPathComponent()); model.showSearch = false } label: { HStack { Image(systemName: item.directory ? "folder.fill" : "doc").foregroundStyle(Theme.accent); VStack(alignment: .leading) { Text(item.name); Text(item.url.path).font(.caption).foregroundStyle(Color(nsColor: Theme.secondaryText)) }; Spacer(); Image(systemName: "arrow.up.forward") } }.buttonStyle(.plain) }
-            HStack { Text("点击结果，打开所在目录").font(.caption).foregroundStyle(Color(nsColor: Theme.secondaryText)); Spacer(); Button("关闭") { model.showSearch = false } }
-        }.padding(24).frame(width: 780, height: 540)
     }
 }

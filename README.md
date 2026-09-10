@@ -4,6 +4,18 @@
 
 布局参考本机 ForkLift；主题参考 Chui Eve 的系统外观、浅深色切换、原生材质和系统蓝。原创图标以文件夹和双栏为核心。
 
+### 0.1.5：输入自动搜索
+
+- 修复输入关键词清空列表却未执行搜索、提前显示“0 项”的问题。输入停顿 0.3 秒自动搜索，回车可立即执行。
+- 连续输入取消尚未开始的查询；清空、退出、导航使旧结果失效，避免回填错误关键词的结果。
+
+### 0.1.4：栏内搜索
+
+- 点击对应栏搜索图标或 ⇧⌘F，在工具栏输入关键词并回车；递归结果直接显示在该栏原文件列表，不再弹出输入框或结果窗口。
+- 左右栏搜索状态独立，结果显示所在路径，支持原有选择、预览和文件操作，并提供“所在文件夹”入口。搜索框内 Esc 或关闭图标退出搜索、恢复目录列表。
+- 导航和修改关键词会使旧查询结果失效；刷新会重新搜索。仍支持 `内容:关键词`，范围为当前目录及子目录。
+- 已实测“飞腾”返回 5 项、PDF 选择预览、另一栏目录不变、退出后恢复 14 项。构建、安装和严格签名校验通过。
+
 ### 0.1.3：整体可读性
 
 - 在原生材质上加入高不透明度的自适应底色，约束桌面背景透入造成的亮度变化；深色使用深灰底，浅色使用近白底。
@@ -25,12 +37,20 @@
 
 ## 运行
 
-已安装到 `/Applications/Chui Files.app`，可从启动台、Spotlight 或“应用程序”打开。项目中保留 `build/Chui Files.app`。构建产物为 Apple Silicon 原生程序，最低 macOS 14；当前在本机 macOS 26 编译运行验证。
+已安装到 `/Applications/Chui Files.app`，可从启动台、Spotlight 或“应用程序”打开。项目中保留 `build/Chui Files.app`。构建产物为 Universal 2 通用程序，包含 Apple Silicon（arm64）和 Intel（x86_64）原生版本，最低 macOS 14。Apple Silicon 已在本机 macOS 26 运行验证；Intel 真机运行仍待验证。
 
 ```sh
 zsh scripts/build.sh
 open 'build/Chui Files.app'
 ```
+
+制作带应用图标和 Applications 拖放入口的通用 DMG：
+
+```sh
+zsh scripts/package-dmg.sh
+```
+
+输出文件名随构建版本生成，当前为 `build/Chui-Files-0.1.5-universal.dmg`。应用及挂载卷使用原创图标；DMG 文件的自定义图标依赖 macOS 扩展属性，跨平台传输后可能不保留，包内图标不受影响。当前使用 ad-hoc 签名，尚未做 Apple 公证。
 
 需要 Apple Command Line Tools 中的 Swift。编译脚本会生成完整 `.app`、所有尺寸图标及本机 ad-hoc 签名。不需要 Xcode 工程或 npm。
 

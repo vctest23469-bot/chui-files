@@ -6,6 +6,19 @@ final class Pane: ObservableObject {
     @Published var entries: [Entry] = []
     @Published var selection: Set<String> = []
     @Published var filter = ""
+    @Published var searching = false
+    @Published var searchQuery = ""
+    @Published var searchResults: [Entry] = []
+    @Published var searchRunning = false
+    @Published var searchError: String?
+    @Published var searchFocus = UUID()
+    var searchGeneration = UUID()
+    var pendingSearch: DispatchWorkItem?
+    func endSearch() {
+        pendingSearch?.cancel(); pendingSearch = nil
+        searchGeneration = UUID(); searching = false; searchRunning = false
+        searchQuery = ""; searchResults = []; searchError = nil; selection = []
+    }
     @Published var loading = false
     @Published var error: String?
     @Published var volume: VolumeInfo?
@@ -31,7 +44,7 @@ final class Pane: ObservableObject {
         folder = initial[0]
     }
     var visible: [Entry] {
-        entries.filter { filter.isEmpty || $0.name.localizedStandardContains(filter) || $0.tags.contains(where: { $0.localizedStandardContains(filter) }) }.sorted {
+        (searching && !searchQuery.isEmpty ? searchResults : entries).filter { filter.isEmpty || $0.name.localizedStandardContains(filter) || $0.tags.contains(where: { $0.localizedStandardContains(filter) }) }.sorted {
             if $0.directory != $1.directory { return $0.directory }
             let order: Bool
             if sort == "大小" { order = $0.size == $1.size ? $0.name < $1.name : $0.size < $1.size }
@@ -54,13 +67,14 @@ final class Pane: ObservableObject {
                 self.loading = false
                 self.volume = volume
                 switch result {
-                case .success(let files): self.entries = files; self.error = nil; self.selection.formIntersection(Set(files.map(\.id)))
+                case .success(let files): self.entries = files; self.error = nil; if !self.searching { self.selection.formIntersection(Set(files.map(\.id))) }
                 case .failure(let error): self.entries = []; self.error = error.localizedDescription
                 }
             }
         }
     }
     func go(_ url: URL, hidden: Bool, record: Bool = true) {
+        endSearch()
         if record && url != folder { history.append(folder); future = [] }
         folder = url.standardizedFileURL; tabs[tabIndex] = folder
         filter = ""; selection = []; entries = []; volume = nil
@@ -131,16 +145,11 @@ final class Workspace: ObservableObject {
     @Published var conflict = Conflict.skip
     @Published var linked = false
     @Published var editor: EditorDocument?
-    @Published var searchResults: [Entry] = []
-    @Published var showSearch = false
-    @Published var searchRunning = false
-    @Published var searchError: String?
     @Published var appearance = UserDefaults.standard.string(forKey: "appearance") ?? "系统"
     @Published var accent = UserDefaults.standard.string(forKey: "accent") ?? "系统蓝"
     @Published var showSettings = false
     @Published var syncPresets = (UserDefaults.standard.data(forKey: "syncPresets").flatMap { try? JSONDecoder().decode([SyncPreset].self, from: $0) }) ?? []
     var cancellation = Cancellation()
-    var searchGeneration = UUID()
     @Published var undoMoves: [(URL, URL)] = []
     var monitor: Any?
     private var volumeTimer: Timer?
@@ -157,7 +166,10 @@ final class Workspace: ObservableObject {
         }
     }
     deinit { volumeTimer?.invalidate(); for observer in volumeObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) } }
-    func refresh() { left.load(hidden: hidden); right.load(hidden: hidden); refreshVolumes() }
+    func refresh() {
+        left.load(hidden: hidden); right.load(hidden: hidden); refreshVolumes()
+        for pane in [left, right] where pane.searching && !pane.searchQuery.isEmpty { runSearch(in: pane) }
+    }
     func refreshVolumes() {
         guard !volumesLoading else { return }
         volumesLoading = true
@@ -373,27 +385,50 @@ final class Workspace: ObservableObject {
         }
     }
     func search() {
-        guard let query = prompt("递归搜索", detail: "默认按名称搜索。输入 内容:关键词 可搜索 10 MB 以内的 UTF-8 文本内容；不跟随符号链接。"), !query.isEmpty else { return }
-        let root = active.folder, includeHidden = hidden, token = UUID()
-        searchGeneration = token; searchRunning = true; searchResults = []; searchError = nil; showSearch = true
+        active.searching = true; active.filter = ""; active.searchFocus = UUID()
+    }
+    func scheduleSearch(in pane: Pane) {
+        pane.pendingSearch?.cancel(); pane.searchGeneration = UUID()
+        pane.searchResults = []; pane.searchError = nil; pane.selection = []
+        guard pane.searching, !pane.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            pane.searchRunning = false; return
+        }
+        pane.searchRunning = true
+        let work = DispatchWorkItem { [weak self, weak pane] in
+            guard let self, let pane, pane.searching else { return }
+            self.runSearch(in: pane)
+        }
+        pane.pendingSearch = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+    func runSearch(in pane: Pane) {
+        pane.pendingSearch?.cancel(); pane.pendingSearch = nil
+
+        let query = pane.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let root = pane.folder, includeHidden = hidden, token = UUID()
+        pane.searchGeneration = token; pane.searchResults = []; pane.searchError = nil; pane.selection = []
+        guard !query.isEmpty else { pane.searchRunning = false; return }
+        pane.searchRunning = true
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result {
                 try FileEngine.tree(root, hidden: includeHidden).values.filter { item in
                     if query.hasPrefix("内容:") {
-                        guard !item.directory, !item.symlink, item.size <= 10_000_000 else { return false }
-                        return (try? String(contentsOf: item.url, encoding: .utf8).localizedStandardContains(String(query.dropFirst(3)))) ?? false
+                        let term = String(query.dropFirst(3))
+                        guard !term.isEmpty, !item.directory, !item.symlink, item.size <= 10_000_000 else { return false }
+                        return (try? String(contentsOf: item.url, encoding: .utf8).localizedStandardContains(term)) ?? false
                     }
                     return item.name.localizedStandardContains(query)
                 }.sorted { $0.url.path < $1.url.path }
             }
             DispatchQueue.main.async {
-                guard self.searchGeneration == token else { return }
-                self.searchRunning = false
-                switch result { case .success(let files): self.searchResults = files
-                case .failure(let error): self.searchError = error.localizedDescription; self.log(error.localizedDescription, failed: true) }
+                guard pane.searchGeneration == token, pane.searching, pane.folder == root else { return }
+                pane.searchRunning = false
+                switch result { case .success(let files): pane.searchResults = files
+                case .failure(let error): pane.searchError = error.localizedDescription }
             }
         }
     }
+
 }
 
 struct EditorDocument: Identifiable { let id = UUID(); let url: URL; var text: String; let date: Date }
