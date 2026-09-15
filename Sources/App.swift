@@ -122,6 +122,13 @@ struct MainView: View {
             }
             if model.showActivities { ActivityView(model: model).frame(height: 150) }
             Divider()
+            if model.busy && !model.transferDetail.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack { Text(model.transferDetail).lineLimit(1); Spacer(); if let fraction = model.transferFraction { Text("\(Int(fraction * 100))%").monospacedDigit() } }
+                    if let fraction = model.transferFraction { ProgressView(value: fraction).progressViewStyle(.linear) }
+                    else { ProgressView().controlSize(.mini) }
+                }.font(.system(size: 11)).padding(.horizontal, 14).padding(.vertical, 8)
+            }
             HStack(spacing: 12) {
                 if model.busy { ProgressView().controlSize(.small); Text("\(model.completed)/\(model.total)").monospacedDigit(); Button("取消后续") { model.cancellation.stop() }.buttonStyle(WorkbenchButtonStyle()).help("当前单个文件操作完成后停止") }
                 else { Image(systemName: "circle.fill").font(.system(size: 5)).foregroundStyle(.green) }
@@ -330,13 +337,14 @@ struct FileTable: NSViewRepresentable {
         let rowHeight: CGFloat = pane.searching && !pane.searchQuery.isEmpty ? 42 : 25
         let layoutChanged = coordinator.table?.rowHeight != rowHeight
         coordinator.table?.rowHeight = rowHeight
-        if rows != coordinator.rows || layoutChanged { coordinator.rows = rows; coordinator.updating = true; coordinator.table?.reloadData(); coordinator.updating = false }
+        if rows != coordinator.rows || layoutChanged || coordinator.sizeRevision != pane.sizeRevision { coordinator.sizeRevision = pane.sizeRevision; coordinator.rows = rows; coordinator.updating = true; coordinator.table?.reloadData(); coordinator.updating = false }
         let indexes = IndexSet(rows.enumerated().filter { pane.selection.contains($0.element.id) }.map(\.offset))
         if coordinator.table?.selectedRowIndexes != indexes { coordinator.updating = true; coordinator.table?.selectRowIndexes(indexes, byExtendingSelection: false); coordinator.updating = false }
     }
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var parent: FileTable
         var rows: [Entry] = []
+        var sizeRevision = -1
         weak var table: NSTableView?
         var updating = false
         init(_ parent: FileTable) { self.parent = parent }
@@ -361,7 +369,7 @@ struct FileTable: NSViewRepresentable {
                 return stack
             }
             field.textColor = Theme.secondaryText
-            if tableColumn?.identifier.rawValue == "size" { field.stringValue = entry.sizeText; field.alignment = .right }
+            if tableColumn?.identifier.rawValue == "size" { field.stringValue = parent.pane.sizeText(entry); field.alignment = .right }
             else { field.stringValue = entry.modified.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits).hour().minute()) }
             return field
         }
@@ -394,6 +402,12 @@ struct FileTable: NSViewRepresentable {
             case 9: m.copyPaths()
             case 10: NSWorkspace.shared.activateFileViewerSelecting(parent.pane.selected.map(\.url))
             case 11: m.edit()
+            case 20: m.create(directory: true)
+            case 21: m.create(directory: false)
+            case 22: m.paste()
+            case 23: m.refresh()
+            case 24: NSPasteboard.general.clearContents(); NSPasteboard.general.setString(parent.pane.folder.path, forType: .string)
+            case 25: m.terminal()
             default: break
             }
         }
@@ -417,7 +431,19 @@ final class NativeTable: NSTableView {
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let owner else { return nil }
         let row = row(at: convert(event.locationInWindow, from: nil))
-        guard row >= 0 else { return nil }
+        if row < 0 {
+            owner.parent.model.activeLeft = owner.parent.isLeft
+            deselectAll(nil); owner.parent.pane.selection = []
+            let menu = NSMenu(); menu.autoenablesItems = false
+            for (index, title) in ["新建文件夹…", "新建文件…", "粘贴", "刷新", "复制当前目录路径", "在终端打开"].enumerated() {
+                let item = NSMenuItem(title: title, action: #selector(FileTable.Coordinator.menuAction(_:)), keyEquivalent: "")
+                item.tag = 20 + index; item.target = owner
+                if index <= 2 { item.isEnabled = !owner.parent.model.busy }
+                if index == 2 { item.isEnabled = item.isEnabled && NSPasteboard.general.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) }
+                menu.addItem(item)
+            }
+            return menu
+        }
         if !selectedRowIndexes.contains(row) { selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
         owner.parent.model.activeLeft = owner.parent.isLeft
         let menu = NSMenu()
@@ -455,7 +481,7 @@ struct Inspector: View {
                 VStack(alignment: .leading, spacing: 14) {
                     Text(item.name).font(.system(size: 14, weight: .semibold)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     info("类型", item.symlink ? "符号链接" : item.directory ? "文件夹" : item.url.pathExtension.uppercased() + " 文件")
-                    info("大小", item.sizeText)
+                    info("大小", pane.sizeText(item))
                     info("修改", item.modified.formatted(date: .abbreviated, time: .shortened))
                     info("标签", item.tags.isEmpty ? "无" : item.tags.joined(separator: "、"))
                     Text(item.url.path).font(.system(size: 10)).foregroundStyle(Color(nsColor: Theme.secondaryText)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)

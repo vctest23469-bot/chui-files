@@ -18,6 +18,7 @@ final class Pane: ObservableObject {
         pendingSearch?.cancel(); pendingSearch = nil
         searchGeneration = UUID(); searching = false; searchRunning = false
         searchQuery = ""; searchResults = []; searchError = nil; selection = []
+        calculateFolderSizes(entries)
     }
     @Published var loading = false
     @Published var error: String?
@@ -27,6 +28,7 @@ final class Pane: ObservableObject {
     @Published var grid = false
     @Published var sort = "名称"
     @Published var ascending = true
+    @Published var foldersFirst = UserDefaults.standard.bool(forKey: "foldersFirst")
     var history: [URL] = []
     var future: [URL] = []
     var generation = UUID()
@@ -43,14 +45,40 @@ final class Pane: ObservableObject {
         tabs = initial
         folder = initial[0]
     }
+    @Published var folderSizes: [String: Int64] = [:]
+    @Published var sizeErrors: Set<String> = []
+    @Published var sizeRevision = 0
+    private var sizeCancellation = Cancellation()
+    private static let sizeQueue = DispatchQueue(label: "chui.folder-sizes", qos: .utility)
+    func sizeText(_ entry: Entry) -> String {
+        guard entry.directory else { return entry.sizeText }
+        if entry.symlink { return "链接" }
+        if sizeErrors.contains(entry.id) { return "无法完整读取" }
+        guard let bytes = folderSizes[entry.id] else { return "计算中…" }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+    func calculateFolderSizes(_ files: [Entry]) {
+        sizeCancellation.stop(); sizeCancellation = Cancellation()
+        let cancellation = sizeCancellation
+        folderSizes = [:]; sizeErrors = []; sizeRevision += 1
+        Self.sizeQueue.async { [weak self] in
+            for entry in files where entry.directory && !entry.symlink {
+                if cancellation.cancelled { return }
+                let result = Result { try FileEngine.folderBytes(entry.url, cancelled: { cancellation.cancelled }) }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !cancellation.cancelled else { return }
+                    switch result {
+                    case .success(let bytes): self.folderSizes[entry.id] = bytes
+                    case .failure: self.sizeErrors.insert(entry.id)
+                    }
+                    self.sizeRevision += 1
+                }
+            }
+        }
+    }
     var visible: [Entry] {
         (searching && !searchQuery.isEmpty ? searchResults : entries).filter { filter.isEmpty || $0.name.localizedStandardContains(filter) || $0.tags.contains(where: { $0.localizedStandardContains(filter) }) }.sorted {
-            if $0.directory != $1.directory { return $0.directory }
-            let order: Bool
-            if sort == "大小" { order = $0.size == $1.size ? $0.name < $1.name : $0.size < $1.size }
-            else if sort == "修改时间" { order = $0.modified == $1.modified ? $0.name < $1.name : $0.modified < $1.modified }
-            else { order = $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-            return ascending ? order : !order
+            EntryOrder.precedes($0, $1, key: sort, ascending: ascending, foldersFirst: foldersFirst, sizes: folderSizes)
         }
     }
     var selected: [Entry] { visible.filter { selection.contains($0.id) } }
@@ -67,13 +95,14 @@ final class Pane: ObservableObject {
                 self.loading = false
                 self.volume = volume
                 switch result {
-                case .success(let files): self.entries = files; self.error = nil; if !self.searching { self.selection.formIntersection(Set(files.map(\.id))) }
+                case .success(let files): self.entries = files; self.error = nil; if !self.searching { self.calculateFolderSizes(files) }; if !self.searching { self.selection.formIntersection(Set(files.map(\.id))) }
                 case .failure(let error): self.entries = []; self.error = error.localizedDescription
                 }
             }
         }
     }
     func go(_ url: URL, hidden: Bool, record: Bool = true) {
+        sizeCancellation.stop()
         endSearch()
         if record && url != folder { history.append(folder); future = [] }
         folder = url.standardizedFileURL; tabs[tabIndex] = folder
@@ -105,7 +134,7 @@ final class Pane: ObservableObject {
         }
         source.setCancelHandler { Darwin.close(descriptor) }; source.resume(); watcher = source
     }
-    deinit { watcher?.cancel(); refreshWork?.cancel() }
+    deinit { sizeCancellation.stop(); watcher?.cancel(); refreshWork?.cancel() }
 }
 
 struct Activity: Identifiable {
@@ -127,12 +156,20 @@ final class Workspace: ObservableObject {
     let left = Pane(key: "left", fallback: FileManager.default.homeDirectoryForCurrentUser)
     let right = Pane(key: "right", fallback: URL(fileURLWithPath: "/Volumes"))
     @Published var activeLeft = true
+    @Published var foldersFirst = UserDefaults.standard.bool(forKey: "foldersFirst") {
+        didSet {
+            UserDefaults.standard.set(foldersFirst, forKey: "foldersFirst")
+            left.foldersFirst = foldersFirst; right.foldersFirst = foldersFirst
+        }
+    }
     @Published var hidden = UserDefaults.standard.bool(forKey: "hidden")
     @Published var inspector = true
     @Published var showActivities = false
     @Published var activities: [Activity] = []
     @Published var status = "就绪"
     @Published var busy = false
+    @Published var transferDetail = ""
+    @Published var transferFraction: Double?
     @Published var completed = 0
     @Published var total = 0
     @Published var favorites: [String] = UserDefaults.standard.stringArray(forKey: "favorites") ?? []
@@ -240,6 +277,7 @@ final class Workspace: ObservableObject {
 
     func batch(_ title: String, items: [URL], action: @escaping (URL) throws -> String) {
         guard !busy, !items.isEmpty else { return }
+        transferFraction = nil; transferDetail = ""
         busy = true; total = items.count; completed = 0; status = title
         cancellation = Cancellation(); let token = cancellation
         DispatchQueue.global(qos: .userInitiated).async {
@@ -255,7 +293,7 @@ final class Workspace: ObservableObject {
                 }
             }
             let summary = "\(title)：处理 \(succeeded) 项，失败 \(failures) 项" + (token.cancelled ? "（已取消后续项目）" : "")
-            DispatchQueue.main.async { self.busy = false; self.log(summary, failed: failures > 0); self.refresh(); if failures > 0 { self.showActivities = true } }
+            DispatchQueue.main.async { self.busy = false; self.transferFraction = nil; self.transferDetail = ""; self.log(summary, failed: failures > 0); self.refresh(); if failures > 0 { self.showActivities = true } }
         }
     }
     func transfer(move: Bool, urls: [URL]? = nil, target: URL? = nil) {
@@ -263,7 +301,18 @@ final class Workspace: ObservableObject {
         guard !sources.isEmpty, !busy else { return }
         if move && !confirm("移动 \(sources.count) 个项目？", "目标：\(destination.path)\n同名处理：\(policy.rawValue)", button: "移动") { return }
         batch(move ? "移动" : "复制", items: sources) { url in
-            if let result = try FileEngine.transfer(url, to: destination, move: move, conflict: policy) {
+            let start = Date(); var lastUpdate = Date.distantPast
+            DispatchQueue.main.async { self.transferDetail = "正在准备：" + url.lastPathComponent; self.transferFraction = nil }
+            if let result = try FileEngine.transferWithProgress(url, to: destination, move: move, conflict: policy, progress: { bytes, total in
+                let now = Date()
+                guard now.timeIntervalSince(lastUpdate) >= 0.15 || bytes == total else { return }
+                lastUpdate = now
+                let elapsed = max(0.01, now.timeIntervalSince(start)), speed = Double(bytes) / elapsed
+                let format: (Int64) -> String = { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
+                let eta = speed > 0 ? " · 约剩 \(Int(Double(max(0, total - bytes)) / speed)) 秒" : ""
+                let detail = "\(url.lastPathComponent) · \(format(bytes)) / \(format(total)) · \(format(Int64(speed)))/秒" + eta
+                DispatchQueue.main.async { self.transferFraction = total > 0 ? Double(bytes) / Double(total) : nil; self.transferDetail = detail }
+            }) {
                 if move { DispatchQueue.main.async { self.undoMoves.append((result, url)) } }
                 return "\(move ? "已移动" : "已复制")：\(url.lastPathComponent) → \(result.path)"
             }
@@ -423,7 +472,7 @@ final class Workspace: ObservableObject {
             DispatchQueue.main.async {
                 guard pane.searchGeneration == token, pane.searching, pane.folder == root else { return }
                 pane.searchRunning = false
-                switch result { case .success(let files): pane.searchResults = files
+                switch result { case .success(let files): pane.searchResults = files; pane.calculateFolderSizes(files)
                 case .failure(let error): pane.searchError = error.localizedDescription }
             }
         }

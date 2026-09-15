@@ -16,13 +16,13 @@ struct DeviceList: View {
                     HStack {
                         Text("可用 \(volume.availableText)").monospacedDigit()
                         Spacer()
-                        if let fraction = volume.availableFraction { Text("\(Int((fraction * 100).rounded()))% 剩余").monospacedDigit().foregroundStyle(Color(nsColor: Theme.secondaryText)) }
+                        if let fraction = volume.availableFraction { Text("\(Int(((1 - fraction) * 100).rounded()))% 已用").monospacedDigit().foregroundStyle(Color(nsColor: Theme.secondaryText)) }
                     }.font(.system(size: 11)).padding(.leading, 25)
                     if let fraction = volume.availableFraction {
                         GeometryReader { geometry in
                             Capsule().fill(Color.primary.opacity(0.09))
                             Capsule().fill(fraction < 0.1 ? Color.orange : Theme.navigationIcon)
-                                .frame(width: geometry.size.width * fraction)
+                                .frame(width: geometry.size.width * (1 - fraction))
                         }.frame(height: 3).padding(.leading, 25).accessibilityHidden(true)
                     }
                 }.padding(.horizontal, 8).padding(.vertical, 9)
@@ -30,7 +30,7 @@ struct DeviceList: View {
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                     .contentShape(Rectangle())
             }.buttonStyle(.plain)
-                .help("\(volume.name)\n挂载点：\(volume.url.path)\n总容量：\(volume.totalText)\n可用：\(volume.availableText)\n细条表示可用比例。每 15 秒刷新。APFS 可用空间可能由多个卷共享，不等于目录占用。")
+                .help("\(volume.name)\n挂载点：\(volume.url.path)\n总容量：\(volume.totalText)\n可用：\(volume.availableText)\n实色表示已用比例，空白表示剩余比例。每 15 秒刷新。APFS 可用空间可能由多个卷共享，不等于目录占用。")
                 .accessibilityLabel("\(volume.name)，总容量 \(volume.totalText)，可用容量 \(volume.availableText)")
         }
     }

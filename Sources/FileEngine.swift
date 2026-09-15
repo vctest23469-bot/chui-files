@@ -13,6 +13,24 @@ struct Entry: Identifiable, Hashable {
     var sizeText: String { directory ? "—" : ByteCountFormatter.string(fromByteCount: size, countStyle: .file) }
 }
 
+enum EntryOrder {
+    static func precedes(_ a: Entry, _ b: Entry, key: String, ascending: Bool, foldersFirst: Bool = false, sizes: [String: Int64] = [:]) -> Bool {
+        if foldersFirst && a.directory != b.directory { return a.directory }
+        var order: ComparisonResult = .orderedSame
+        if key == "大小" {
+            let x = a.directory ? sizes[a.id] : a.size, y = b.directory ? sizes[b.id] : b.size
+            // Unknown sizes stay at the end in either direction.
+            if x == nil && y != nil { return false }; if x != nil && y == nil { return true }
+            if let x, let y, x != y { order = x < y ? .orderedAscending : .orderedDescending }
+        } else if key == "修改时间", a.modified != b.modified {
+            order = a.modified < b.modified ? .orderedAscending : .orderedDescending
+        }
+        if order == .orderedSame { order = a.name.localizedStandardCompare(b.name) }
+        if order == .orderedSame { order = a.id.compare(b.id) }
+        return order == (ascending ? .orderedAscending : .orderedDescending)
+    }
+}
+
 enum FileFailure: LocalizedError {
     case message(String)
     var errorDescription: String? { if case .message(let value) = self { return value }; return nil }
@@ -153,6 +171,22 @@ enum FileEngine {
         return target
     }
 
+    // Logical file bytes, including hidden files; never follow symbolic links.
+    static func folderBytes(_ root: URL, cancelled: () -> Bool = { false }) throws -> Int64 {
+        var failure: Error?
+        guard let scan = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey], options: [], errorHandler: { _, error in failure = error; return false }) else {
+            throw FileFailure.message("无法读取文件夹")
+        }
+        var total: Int64 = 0
+        for case let url as URL in scan {
+            if cancelled() { throw FileFailure.message("计算已取消") }
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey])
+            if values.isSymbolicLink == true { scan.skipDescendants(); continue }
+            if values.isDirectory != true { total += Int64(values.fileSize ?? 0) }
+        }
+        if let failure { throw failure }
+        return total
+    }
     static func tree(_ root: URL, hidden: Bool) throws -> [String: Entry] {
         var result: [String: Entry] = [:]
         var scanError: Error?

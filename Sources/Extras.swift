@@ -77,6 +77,8 @@ struct SettingsView: View {
             Picker("强调色", selection: $model.accent) { ForEach(["系统蓝", "橙色", "绿色", "紫色"], id: \.self) { Text($0).tag($0) } }
                 .onChange(of: model.accent) { _, value in UserDefaults.standard.set(value, forKey: "accent") }
             Divider()
+            Toggle("文件夹优先", isOn: $model.foldersFirst)
+            Text("关闭时，文件和文件夹按所选列混合排序；同时应用于左右栏。").font(.caption).foregroundStyle(.secondary)
             Toggle("显示隐藏文件", isOn: Binding(get: { model.hidden }, set: { _ in model.toggleHidden() }))
             Toggle("左右文件夹联动浏览", isOn: $model.linked)
             Picker("复制 / 移动遇到同名", selection: $model.conflict) { ForEach(Conflict.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
