@@ -8,6 +8,10 @@
 
 [下载安装包](https://github.com/vctest23469-bot/chui-files/releases/latest) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/vctest23469-bot/chui-files/issues) · [参与贡献](CONTRIBUTING.md)
 
+![Chui Files 原生双栏文件管理器 CG 展示图](docs/assets/chui-files-cg-v1.png)
+
+*基于实际界面制作的 CG 展示图；目录与文件为演示数据，界面细节以当前应用为准。*
+
 ## 适合哪些工作
 
 - **整理下载、文档和项目资料**：双栏、多标签、收藏、最近目录与可点击路径导航。
